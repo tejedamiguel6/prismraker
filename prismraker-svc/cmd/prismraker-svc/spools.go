@@ -45,15 +45,48 @@ func refreshSpools(ctx context.Context, led *ledger.Ledger, sc *spoolman.Client,
 	}
 }
 
+// minReportMM is the smallest consumption delta worth sending to Spoolman, to
+// avoid a flurry of tiny writes.
+const minReportMM = 1.0
+
+// reconcileUsage sends each toolhead's newly-consumed filament to its mapped
+// spool. reported tracks the cumulative mm already sent per toolhead, so only
+// the delta goes out. When sync is false it logs intended writes (dry run) but
+// still advances reported so the log reads as per-interval consumption.
+func reconcileUsage(ctx context.Context, led *ledger.Ledger, sc *spoolman.Client, mapping map[int]int, reported map[int]float64, sync bool) {
+	for _, t := range led.Snapshot() {
+		id, ok := mapping[t.Index]
+		if !ok {
+			continue
+		}
+		delta := t.UsedMM - reported[t.Index]
+		if delta < minReportMM {
+			continue
+		}
+		if sync {
+			if err := sc.UseLength(ctx, id, delta); err != nil {
+				log.Printf("spoolman: T%d spool %d use: %v", t.Index, id, err)
+				continue // keep reported unchanged so we retry this delta next tick
+			}
+			log.Printf("spoolman: T%d spool %d -= %.1fmm", t.Index, id, delta)
+		} else {
+			log.Printf("spoolman: [dry-run] T%d spool %d would -= %.1fmm (pass -spoolman-sync to apply)", t.Index, id, delta)
+		}
+		reported[t.Index] = t.UsedMM
+	}
+}
+
 // runSpoolman wires Spoolman into the ledger: an immediate fetch, then a periodic
-// refresh so remaining-weight stays current. Blocks until ctx is cancelled.
-func runSpoolman(ctx context.Context, led *ledger.Ledger, url, spools string, onChange func()) {
+// loop that reports consumed filament (M3) and refreshes remaining-weight. When
+// sync is false, usage reconciliation is a dry run. Blocks until ctx is cancelled.
+func runSpoolman(ctx context.Context, led *ledger.Ledger, url, spools string, sync bool, onChange func()) {
 	sc := spoolman.New(url)
 	mapping := parseSpoolMap(spools)
 	if len(mapping) == 0 {
 		log.Printf("spoolman: no -spools mapping given; nothing to fetch")
 		return
 	}
+	reported := map[int]float64{}
 	refreshSpools(ctx, led, sc, mapping)
 	onChange()
 
@@ -64,6 +97,8 @@ func runSpoolman(ctx context.Context, led *ledger.Ledger, url, spools string, on
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			// Decrement first, then read back the updated weights for the UI.
+			reconcileUsage(ctx, led, sc, mapping, reported, sync)
 			refreshSpools(ctx, led, sc, mapping)
 			onChange()
 		}

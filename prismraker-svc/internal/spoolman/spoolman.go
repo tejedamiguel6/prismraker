@@ -5,6 +5,7 @@
 package spoolman
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -89,4 +90,30 @@ func (c *Client) Spool(ctx context.Context, id int) (*Spool, error) {
 		return nil, fmt.Errorf("decode spool %d: %w", id, err)
 	}
 	return &s, nil
+}
+
+// UseLength reports filament consumed from a spool in millimeters. Spoolman
+// subtracts it from the spool's remaining length/weight (it knows the diameter
+// and density), so callers must send deltas, not cumulative totals. This is the
+// write that fixes multi-color accounting: the right spool decrements.
+func (c *Client) UseLength(ctx context.Context, id int, mm float64) error {
+	url := fmt.Sprintf("%s/api/v1/spool/%d/use", c.base, id)
+	body, err := json.Marshal(map[string]float64{"use_length": mm})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("use spool %d: %w", id, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("use spool %d: status %d", id, resp.StatusCode)
+	}
+	return nil
 }

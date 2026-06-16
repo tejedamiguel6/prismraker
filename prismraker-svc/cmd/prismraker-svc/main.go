@@ -30,6 +30,7 @@ func main() {
 	capturePath := flag.String("capture", "", "if set, append raw Moonraker frames to this JSONL file for field validation")
 	spoolmanURL := flag.String("spoolman", "", "Spoolman base URL for spool colors/weights, e.g. http://localhost:7912")
 	spools := flag.String("spools", "", "comma-separated Spoolman spool ids per toolhead, e.g. 1,2,3,4 (blank = unassigned)")
+	spoolmanSync := flag.Bool("spoolman-sync", false, "actually decrement Spoolman spools as filament is used (default: dry-run, log only)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -53,8 +54,12 @@ func main() {
 	// Spoolman configured but -mock set, fall back to demo spools so the
 	// dashboard still shows swatches.
 	if *spoolmanURL != "" {
-		log.Printf("spoolman: %s, mapping toolheads -> spools [%s]", *spoolmanURL, *spools)
-		go runSpoolman(ctx, led, *spoolmanURL, *spools, srv.Broadcast)
+		mode := "dry-run"
+		if *spoolmanSync {
+			mode = "sync (decrements spools)"
+		}
+		log.Printf("spoolman: %s, toolheads -> spools [%s], %s", *spoolmanURL, *spools, mode)
+		go runSpoolman(ctx, led, *spoolmanURL, *spools, *spoolmanSync, srv.Broadcast)
 	} else if *mock {
 		assignDemoSpools(led)
 	}

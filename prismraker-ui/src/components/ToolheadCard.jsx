@@ -12,11 +12,12 @@ function contrast(hex) {
 
 export default function ToolheadCard({ t }) {
   const low = t.remainingGram > 0 && t.remainingGram < 80;
+  const swatchBg = t.colorHex || "#2a2d36"; // neutral fill when unassigned
   const fg = contrast(t.colorHex || "#888888");
 
   return (
     <div className={`card ${t.active ? "card--active" : ""}`}>
-      <div className="swatch" style={{ background: t.colorHex, color: fg }}>
+      <div className="swatch" style={{ background: swatchBg, color: fg }}>
         <span className="swatch__name">{t.name}</span>
         {t.active && <span className="swatch__badge" style={{ color: fg }}>PRINTING</span>}
       </div>

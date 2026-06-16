@@ -28,6 +28,8 @@ func main() {
 	toolheads := flag.Int("toolheads", 4, "number of toolheads (U1 = 4)")
 	mock := flag.Bool("mock", false, "run without hardware, feeding a simulated multi-color print")
 	capturePath := flag.String("capture", "", "if set, append raw Moonraker frames to this JSONL file for field validation")
+	spoolmanURL := flag.String("spoolman", "", "Spoolman base URL for spool colors/weights, e.g. http://localhost:7912")
+	spools := flag.String("spools", "", "comma-separated Spoolman spool ids per toolhead, e.g. 1,2,3,4 (blank = unassigned)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -46,6 +48,16 @@ func main() {
 
 	led := ledger.New(*toolheads)
 	srv := api.New(led)
+
+	// Spool colors/names/weights from Spoolman, refreshed periodically. With no
+	// Spoolman configured but -mock set, fall back to demo spools so the
+	// dashboard still shows swatches.
+	if *spoolmanURL != "" {
+		log.Printf("spoolman: %s, mapping toolheads -> spools [%s]", *spoolmanURL, *spools)
+		go runSpoolman(ctx, led, *spoolmanURL, *spools, srv.Broadcast)
+	} else if *mock {
+		assignDemoSpools(led)
+	}
 
 	var mc statusFeed
 	if *mock {

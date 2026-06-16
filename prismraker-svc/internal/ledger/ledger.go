@@ -32,6 +32,12 @@ type Ledger struct {
 	toolheads  map[int]*Toolhead
 	activeTool int
 	updatedAt  time.Time
+
+	// The U1 reports one cumulative filament counter for the whole print
+	// (print_stats.filament_used), not per-extruder. We attribute its deltas to
+	// whichever tool is active — that's the multi-color fix.
+	lastTotalPos float64
+	totalPosSet  bool
 }
 
 func New(count int) *Ledger {
@@ -75,12 +81,38 @@ func (l *Ledger) ObservePosition(index int, cumulativeMM float64) {
 	l.updatedAt = time.Now()
 }
 
-// SetTemp updates live temperature for a toolhead.
-func (l *Ledger) SetTemp(index int, temp, target float64) {
+// ObserveTotalFilament feeds the printer's single cumulative filament counter
+// (print_stats.filament_used) and attributes the delta to the active tool. This
+// is the U1-correct model: there is no per-extruder position, so usage is
+// charged to whichever toolhead is selected when the counter advances.
+func (l *Ledger) ObserveTotalFilament(cumulativeMM float64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.totalPosSet {
+		if d := cumulativeMM - l.lastTotalPos; d > 0 {
+			if t := l.toolheads[l.activeTool]; t != nil {
+				t.UsedMM += d
+			}
+		}
+	}
+	l.lastTotalPos = cumulativeMM
+	l.totalPosSet = true
+	l.updatedAt = time.Now()
+}
+
+// SetTemp updates live temperature for a toolhead. nil leaves a field unchanged,
+// which matters because Moonraker only streams temperature when it changes — a
+// delta frame for an extruder often carries other fields but no temperature.
+func (l *Ledger) SetTemp(index int, temp, target *float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if t := l.toolheads[index]; t != nil {
-		t.Temperature, t.Target = temp, target
+		if temp != nil {
+			t.Temperature = *temp
+		}
+		if target != nil {
+			t.Target = *target
+		}
 	}
 }
 

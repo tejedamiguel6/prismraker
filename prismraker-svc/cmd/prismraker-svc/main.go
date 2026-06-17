@@ -20,22 +20,78 @@ import (
 	"github.com/yourname/go-moonraker/moonraker"
 	"github.com/yourname/prismraker-svc/internal/api"
 	"github.com/yourname/prismraker-svc/internal/ledger"
+	"github.com/yourname/prismraker-svc/internal/spoolman"
+	"github.com/yourname/prismraker-svc/internal/spoolsvc"
 )
 
 func main() {
 	wsURL := flag.String("moonraker", "ws://printer.local:7125/websocket", "Moonraker websocket URL")
 	listen := flag.String("listen", ":8420", "address for the prismraker API/UI server")
 	toolheads := flag.Int("toolheads", 4, "number of toolheads (U1 = 4)")
+	mock := flag.Bool("mock", false, "run without hardware, feeding a simulated multi-color print")
+	capturePath := flag.String("capture", "", "if set, append raw Moonraker frames to this JSONL file for field validation")
+	spoolmanURL := flag.String("spoolman", "", "Spoolman base URL for spool colors/weights, e.g. http://localhost:7912")
+	spools := flag.String("spools", "", "comma-separated Spoolman spool ids per toolhead, e.g. 1,2,3,4 (blank = unassigned)")
+	spoolmanSync := flag.Bool("spoolman-sync", false, "actually decrement Spoolman spools as filament is used (default: dry-run, log only)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	led := ledger.New(*toolheads)
-	srv := api.New(led)
+	var cap *capture
+	if *capturePath != "" {
+		c, err := newCapture(*capturePath)
+		if err != nil {
+			log.Fatalf("capture: %v", err)
+		}
+		cap = c
+		defer cap.Close()
+		log.Printf("[capture] recording raw frames to %s", *capturePath)
+	}
 
-	mc := moonraker.New(*wsURL)
+	led := ledger.New(*toolheads)
+
+	// Spool service: live Spoolman when a URL is given, otherwise an offline demo
+	// catalog so the picker still works. The UI assigns spools by calling it.
+	var sclient *spoolman.Client
+	if *spoolmanURL != "" {
+		sclient = spoolman.New(*spoolmanURL)
+	}
+	svc := spoolsvc.New(led, sclient, *spoolmanSync, demoSpools())
+	srv := api.New(led, svc)
+
+	// Optional startup assignment. With Spoolman, honor -spools "1,2,3,4"; in
+	// -mock mode, preload the first demo spools so the dashboard isn't empty.
+	if sclient != nil {
+		mode := "dry-run"
+		if *spoolmanSync {
+			mode = "sync (decrements spools)"
+		}
+		log.Printf("spoolman: %s, %s", *spoolmanURL, mode)
+		for idx, id := range parseSpoolMap(*spools) {
+			if err := svc.Assign(ctx, idx, id); err != nil {
+				log.Printf("spoolman: startup assign T%d spool %d: %v", idx, id, err)
+			}
+		}
+	} else if *mock {
+		demo := demoSpools()
+		for i := 0; i < *toolheads && i < len(demo); i++ {
+			_ = svc.Assign(ctx, i, demo[i].ID)
+		}
+	}
+	go svc.Run(ctx, srv.Broadcast)
+
+	var mc statusFeed
+	if *mock {
+		log.Printf("[mock] no printer connection; using simulated data")
+		mc = newMockClient(*toolheads)
+	} else {
+		mc = moonraker.New(*wsURL)
+	}
 	mc.OnNotification("notify_status_update", func(params json.RawMessage) {
+		if cap != nil {
+			cap.record("notify_status_update", params)
+		}
 		su, err := moonraker.ParseStatusUpdate(params)
 		if err != nil {
 			log.Printf("parse status update: %v", err)
@@ -51,20 +107,37 @@ func main() {
 	defer mc.Close()
 
 	// Subscribe to the four extruders + toolhead + print_stats. nil = all fields.
-	// TODO: confirm the U1 fork's object/field names for the active tool and
-	// per-extruder filament position (Snapmaker reworked ~15% of Moonraker).
+	// Field names confirmed against a live U1 (Klipper fork 1.4.x): active tool is
+	// toolhead.extruder; usage is print_stats.filament_used (one cumulative
+	// counter, not per-extruder); temps are extruderN.temperature/target.
 	objects := map[string]any{
-		"extruder":     nil,
-		"extruder1":    nil,
-		"extruder2":    nil,
-		"extruder3":    nil,
-		"toolhead":     nil,
-		"print_stats":  nil,
+		"extruder":    nil,
+		"extruder1":   nil,
+		"extruder2":   nil,
+		"extruder3":   nil,
+		"toolhead":    nil,
+		"print_stats": nil,
 	}
-	if _, err := mc.SubscribeStatus(ctx, objects); err != nil {
+	snapshot, err := mc.SubscribeStatus(ctx, objects)
+	if err != nil {
 		log.Fatalf("subscribe: %v", err)
 	}
-	log.Printf("subscribed to %d toolheads on %s", *toolheads, *wsURL)
+	// Moonraker only streams fields that change, so steady-state temps never
+	// arrive as deltas. Seed full state from the subscribe response, whose shape
+	// is {"eventtime":N, "status": {objects...}}.
+	if len(snapshot) > 0 {
+		var snap struct {
+			Status map[string]json.RawMessage `json:"status"`
+		}
+		if err := json.Unmarshal(snapshot, &snap); err == nil && snap.Status != nil {
+			applyStatus(led, moonraker.StatusUpdate{Objects: snap.Status})
+		}
+	}
+	source := *wsURL
+	if *mock {
+		source = "mock"
+	}
+	log.Printf("subscribed to %d toolheads on %s", *toolheads, source)
 
 	go func() {
 		log.Printf("prismraker API listening on %s", *listen)
@@ -78,25 +151,64 @@ func main() {
 	_ = os.Stdout.Sync()
 }
 
-// applyStatus maps a Moonraker status update onto the per-toolhead ledger.
+// applyStatus maps a Moonraker status update onto the per-toolhead ledger,
+// using the field layout confirmed on a live U1 (extruder -> T0, extruder1 -> T1…):
+//   - active tool        = toolhead.extruder ("extruder1" -> index 1)
+//   - per-tool temps      = extruderN.temperature / .target (only when changed)
+//   - filament usage      = print_stats.filament_used (one cumulative counter,
+//     attributed to the active tool)
 //
-// extruder -> T0, extruder1 -> T1, etc. TODO: verify this mapping and the
-// active-tool signal against the U1 fork.
+// Frames carry only changed fields, so temperature/target are decoded as
+// pointers and left untouched when absent.
 func applyStatus(led *ledger.Ledger, su moonraker.StatusUpdate) {
+	// Active tool first, so usage in this same frame is attributed correctly.
+	if raw, ok := su.Objects["toolhead"]; ok {
+		var th struct {
+			Extruder string `json:"extruder"`
+		}
+		if json.Unmarshal(raw, &th) == nil && th.Extruder != "" {
+			led.SetActive(extruderIndex(th.Extruder))
+		}
+	}
+
 	for i, key := range []string{"extruder", "extruder1", "extruder2", "extruder3"} {
 		raw, ok := su.Objects[key]
 		if !ok {
 			continue
 		}
-		var ex moonraker.Extruder
-		if err := json.Unmarshal(raw, &ex); err != nil {
+		var ex struct {
+			Temperature *float64 `json:"temperature"`
+			Target      *float64 `json:"target"`
+		}
+		if json.Unmarshal(raw, &ex) != nil {
 			continue
 		}
-		led.SetTemp(i, ex.Temperature, ex.Target)
-		if ex.Position != 0 {
-			led.ObservePosition(i, ex.Position)
+		if ex.Temperature != nil || ex.Target != nil {
+			led.SetTemp(i, ex.Temperature, ex.Target)
 		}
 	}
-	// TODO: read the active tool from the U1's toolhead/tool object and call
-	// led.SetActive(idx) so usage is attributed correctly across color changes.
+
+	if raw, ok := su.Objects["print_stats"]; ok {
+		var ps struct {
+			FilamentUsed float64 `json:"filament_used"`
+		}
+		if json.Unmarshal(raw, &ps) == nil && ps.FilamentUsed > 0 {
+			led.ObserveTotalFilament(ps.FilamentUsed)
+		}
+	}
+}
+
+// extruderIndex maps a Moonraker extruder name to a toolhead index:
+// "extruder" -> 0, "extruder1" -> 1, "extruder2" -> 2, "extruder3" -> 3.
+func extruderIndex(name string) int {
+	switch name {
+	case "extruder1":
+		return 1
+	case "extruder2":
+		return 2
+	case "extruder3":
+		return 3
+	default:
+		return 0
+	}
 }

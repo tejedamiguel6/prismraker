@@ -34,11 +34,10 @@ func ParseStatusUpdate(params json.RawMessage) (StatusUpdate, error) {
 
 // Extruder holds the fields we care about from an extruder object. Add fields
 // here as you discover what the U1 fork actually exposes.
+//
+// Note: the U1 has no per-extruder cumulative filament position; usage comes
+// from the single print_stats.filament_used counter (see ledger.ObserveTotalFilament).
 type Extruder struct {
-	Temperature   float64 `json:"temperature"`
-	Target        float64 `json:"target"`
-	PressureValue float64 `json:"pressure"`
-	// Moonraker reports cumulative filament position per extruder; deltas give
-	// per-toolhead usage. Confirm the exact field name on the U1 fork.
-	Position float64 `json:"position"`
+	Temperature float64 `json:"temperature"`
+	Target      float64 `json:"target"`
 }

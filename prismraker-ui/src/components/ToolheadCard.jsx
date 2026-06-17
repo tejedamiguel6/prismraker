@@ -10,18 +10,27 @@ function contrast(hex) {
   return lum > 0.6 ? "#11131a" : "#f5f6fa";
 }
 
-export default function ToolheadCard({ t }) {
+export default function ToolheadCard({ t, onClick }) {
   const low = t.remainingGram > 0 && t.remainingGram < 80;
+  const swatchBg = t.colorHex || "#2a2d36"; // neutral fill when unassigned
   const fg = contrast(t.colorHex || "#888888");
+  const assigned = !!t.colorName;
 
   return (
-    <div className={`card ${t.active ? "card--active" : ""}`}>
-      <div className="swatch" style={{ background: t.colorHex, color: fg }}>
+    <button
+      type="button"
+      className={`card ${t.active ? "card--active" : ""}`}
+      onClick={() => onClick(t)}
+      title="Click to set the loaded spool"
+    >
+      <div className="swatch" style={{ background: swatchBg, color: fg }}>
         <span className="swatch__name">{t.name}</span>
         {t.active && <span className="swatch__badge" style={{ color: fg }}>PRINTING</span>}
       </div>
       <div className="card__body">
-        <div className="card__color">{t.colorName || "Unassigned"}</div>
+        <div className="card__color">
+          {assigned ? t.colorName : <span className="card__assign">+ Assign spool</span>}
+        </div>
         <div className="card__row">
           <span>Nozzle</span>
           <span>{Math.round(t.temperature)}°C{t.target ? ` → ${Math.round(t.target)}°` : ""}</span>
@@ -35,6 +44,6 @@ export default function ToolheadCard({ t }) {
           <span>{t.remainingGram ? `${Math.round(t.remainingGram)} g` : "—"}{low ? " ⚠" : ""}</span>
         </div>
       </div>
-    </div>
+    </button>
   );
 }

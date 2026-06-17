@@ -20,6 +20,8 @@ import (
 	"github.com/yourname/go-moonraker/moonraker"
 	"github.com/yourname/prismraker-svc/internal/api"
 	"github.com/yourname/prismraker-svc/internal/ledger"
+	"github.com/yourname/prismraker-svc/internal/spoolman"
+	"github.com/yourname/prismraker-svc/internal/spoolsvc"
 )
 
 func main() {
@@ -48,21 +50,36 @@ func main() {
 	}
 
 	led := ledger.New(*toolheads)
-	srv := api.New(led)
 
-	// Spool colors/names/weights from Spoolman, refreshed periodically. With no
-	// Spoolman configured but -mock set, fall back to demo spools so the
-	// dashboard still shows swatches.
+	// Spool service: live Spoolman when a URL is given, otherwise an offline demo
+	// catalog so the picker still works. The UI assigns spools by calling it.
+	var sclient *spoolman.Client
 	if *spoolmanURL != "" {
+		sclient = spoolman.New(*spoolmanURL)
+	}
+	svc := spoolsvc.New(led, sclient, *spoolmanSync, demoSpools())
+	srv := api.New(led, svc)
+
+	// Optional startup assignment. With Spoolman, honor -spools "1,2,3,4"; in
+	// -mock mode, preload the first demo spools so the dashboard isn't empty.
+	if sclient != nil {
 		mode := "dry-run"
 		if *spoolmanSync {
 			mode = "sync (decrements spools)"
 		}
-		log.Printf("spoolman: %s, toolheads -> spools [%s], %s", *spoolmanURL, *spools, mode)
-		go runSpoolman(ctx, led, *spoolmanURL, *spools, *spoolmanSync, srv.Broadcast)
+		log.Printf("spoolman: %s, %s", *spoolmanURL, mode)
+		for idx, id := range parseSpoolMap(*spools) {
+			if err := svc.Assign(ctx, idx, id); err != nil {
+				log.Printf("spoolman: startup assign T%d spool %d: %v", idx, id, err)
+			}
+		}
 	} else if *mock {
-		assignDemoSpools(led)
+		demo := demoSpools()
+		for i := 0; i < *toolheads && i < len(demo); i++ {
+			_ = svc.Assign(ctx, i, demo[i].ID)
+		}
 	}
+	go svc.Run(ctx, srv.Broadcast)
 
 	var mc statusFeed
 	if *mock {

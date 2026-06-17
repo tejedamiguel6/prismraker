@@ -70,6 +70,28 @@ func (s Spool) ColorHexCSS() string {
 	return "#" + h
 }
 
+// Spools lists all spools known to Spoolman, for the UI's spool picker.
+func (c *Client) Spools(ctx context.Context) ([]Spool, error) {
+	url := fmt.Sprintf("%s/api/v1/spool", c.base)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("list spools: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list spools: status %d", resp.StatusCode)
+	}
+	var spools []Spool
+	if err := json.NewDecoder(resp.Body).Decode(&spools); err != nil {
+		return nil, fmt.Errorf("decode spools: %w", err)
+	}
+	return spools, nil
+}
+
 // Spool fetches a single spool by id.
 func (c *Client) Spool(ctx context.Context, id int) (*Spool, error) {
 	url := fmt.Sprintf("%s/api/v1/spool/%d", c.base, id)

@@ -111,18 +111,18 @@ workflow. Once a spool is loaded onto a toolhead, the reconcile loop decrements
 
 ## Status / notes for contributors
 
-Works end-to-end in `-mock`; the React build is green. **Not yet verified:**
+Works end-to-end in `-mock`; `go build ./...` + `go vet ./...` are green in both
+`prismraker-svc` and `go-moonraker`, the React build is green, and the `ledger`
+package has tests. **Still open:**
 
-- **Go has not been compiled in the authoring environment** (no toolchain there).
-  Run `go build ./... && go vet ./...` in both `prismraker-svc` and `go-moonraker`.
 - **Live-U1 field names** (`toolhead.extruder`, `print_stats.filament_used`,
   `extruderN.*`) are based on a captured session; re-confirm with `-capture` against
   your machine, especially **usage attribution at tool-change boundaries** (purge/prime).
-- **Known cleanup:** `ledger.ObservePosition` + the `lastPos`/`lastPosSet` fields on
-  `Toolhead` and `Extruder.Position`/`PressureValue` are **dead** since the switch to
-  the single-counter model (`ObserveTotalFilament`). Safe to delete.
-- **No tests yet.** Highest-value first test: `ledger` attribution across a tool change.
 - **Notify sinks** exist but aren't fired from ledger events yet (low-spool/color-change).
+
+Recently done: switched to the single-counter usage model and removed the dead
+per-extruder `ObservePosition`/`lastPos` code and `Extruder.Position`/`PressureValue`;
+added `ledger` tests covering attribution across a tool change.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan.
 

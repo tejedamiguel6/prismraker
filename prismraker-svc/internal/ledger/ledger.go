@@ -21,9 +21,6 @@ type Toolhead struct {
 
 	UsedMM        float64 `json:"usedMm"`        // filament consumed this print
 	RemainingGram float64 `json:"remainingGram"` // from Spoolman, if known
-
-	lastPos    float64 // last cumulative extruder position seen
-	lastPosSet bool
 }
 
 // Ledger holds state for all toolheads and the active tool.
@@ -58,26 +55,6 @@ func (l *Ledger) SetActive(index int) {
 		t.Active = i == index
 	}
 	l.activeTool = index
-	l.updatedAt = time.Now()
-}
-
-// ObservePosition feeds a new cumulative extruder position for a toolhead and
-// accumulates the delta as used filament. Negative deltas (retraction/reset)
-// are ignored for accounting.
-func (l *Ledger) ObservePosition(index int, cumulativeMM float64) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	t := l.toolheads[index]
-	if t == nil {
-		return
-	}
-	if t.lastPosSet {
-		if d := cumulativeMM - t.lastPos; d > 0 {
-			t.UsedMM += d
-		}
-	}
-	t.lastPos = cumulativeMM
-	t.lastPosSet = true
 	l.updatedAt = time.Now()
 }
 
